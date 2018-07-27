@@ -2,12 +2,15 @@
 package nntpserver
 
 import (
+	"bufio"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"net"
 	"net/textproto"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -90,14 +93,15 @@ type NumberedArticle struct {
 type Backend interface {
 	ListGroups(max int) ([]*nntp.Group, error)
 	GetGroup(name string) (*nntp.Group, error)
-	GetArticle(group *nntp.Group, id string) (*nntp.Article, error)
+	GetArticleMsgId(group *nntp.Group, id string) (io.ReadCloser, int64, error)
+	GetArticleNum(group *nntp.Group, num int64) (io.ReadCloser, string, error)
 	GetArticles(group *nntp.Group, from, to int64) ([]NumberedArticle, error)
 	Authorized() bool
 	// Authenticate and optionally swap out the backend for this session.
 	// You may return nil to continue using the same backend.
 	Authenticate(user, pass string) (Backend, error)
 	AllowPost() bool
-	Post(article *nntp.Article) error
+	Post(article io.Reader) error
 }
 
 type session struct {
@@ -333,11 +337,43 @@ func handleGroup(args []string, s *session, c *textproto.Conn) error {
 	return nil
 }
 
-func (s *session) getArticle(args []string) (*nntp.Article, error) {
-	if s.group == nil {
-		return nil, ErrNoGroupSelected
+var MessageIdRegexp = regexp.MustCompile("^<(.*)>$")
+
+func (s *session) getArticle(needGroup bool, args []string) (io.ReadCloser, int64, string, error) {
+	if needGroup && s.group == nil {
+		return nil, -1, "", ErrNoGroupSelected
 	}
-	return s.backend.GetArticle(s.group, args[0])
+	if num, err := strconv.ParseInt(args[0], 10, 64); err == nil {
+		art, msgId, err := s.backend.GetArticleNum(s.group, num)
+		return art, num, msgId, err
+	} else if m := MessageIdRegexp.FindStringSubmatch(args[0]); len(m) >= 2 {
+		msgId := m[1]
+		art, num, err := s.backend.GetArticleMsgId(s.group, msgId)
+		return art, num, msgId, err
+	} else {
+		return nil, -1, "", ErrSyntax
+	}
+}
+
+// readHeaders returns the headers inclusing \r\n
+func readHeaders(artReader io.Reader) ([]string, io.Reader, error) {
+	var reader = bufio.NewReader(artReader)
+	var headers []string
+	for {
+		var line string
+		for len(line) < 2 || line[len(line)-2] != '\r' {
+			l, err := reader.ReadString(byte('\n'))
+			if err != nil {
+				return nil, reader, err
+			}
+			line += l
+		}
+		if line == "\r\n" {
+			break
+		}
+		headers = append(headers, line)
+	}
+	return headers, reader, nil
 }
 
 /*
@@ -363,15 +399,25 @@ func (s *session) getArticle(args []string) (*nntp.Article, error) {
 */
 
 func handleHead(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, num, msgId, err := s.getArticle(true, args)
 	if err != nil {
 		return err
 	}
-	c.PrintfLine("221 1 %s", article.MessageID())
+	defer article.Close()
+
+	headers, _, err := readHeaders(article)
+	if err != nil {
+		return ErrFault
+	}
+
+	c.PrintfLine("221 %d %s", num, msgId)
 	dw := c.DotWriter()
 	defer dw.Close()
-	for k, v := range article.Header {
-		fmt.Fprintf(dw, "%s: %s\r\n", k, v[0])
+	for _, head := range headers {
+		_, err = fmt.Fprint(dw, head)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -405,14 +451,18 @@ func handleHead(args []string, s *session, c *textproto.Conn) error {
 */
 
 func handleBody(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, num, msgId, err := s.getArticle(true, args)
 	if err != nil {
 		return err
 	}
-	c.PrintfLine("222 1 %s", article.MessageID())
+	defer article.Close()
+
+	_, body, err := readHeaders(article)
+
+	c.PrintfLine("222 %d %s", num, msgId)
 	dw := c.DotWriter()
 	defer dw.Close()
-	_, err = io.Copy(dw, article.Body)
+	_, err = io.Copy(dw, body)
 	return err
 }
 
@@ -445,21 +495,22 @@ func handleBody(args []string, s *session, c *textproto.Conn) error {
 */
 
 func handleArticle(args []string, s *session, c *textproto.Conn) error {
-	article, err := s.getArticle(args)
+	article, num, msgId, err := s.getArticle(true, args)
 	if err != nil {
 		return err
 	}
-	c.PrintfLine("220 1 %s", article.MessageID())
+	defer article.Close()
+
+	art, err := ioutil.ReadAll(article)
+	if err != nil {
+		return ErrFault
+	}
+
+	c.PrintfLine("220 %d <%s>", num, msgId)
 	dw := c.DotWriter()
 	defer dw.Close()
 
-	for k, v := range article.Header {
-		fmt.Fprintf(dw, "%s: %s\r\n", k, v[0])
-	}
-
-	fmt.Fprintln(dw, "")
-
-	_, err = io.Copy(dw, article.Body)
+	_, err = dw.Write(art)
 	return err
 }
 
@@ -485,13 +536,8 @@ func handlePost(args []string, s *session, c *textproto.Conn) error {
 
 	c.PrintfLine("340 Go ahead")
 	var err error
-	var article nntp.Article
-	article.Header, err = c.ReadMIMEHeader()
-	if err != nil {
-		return ErrPostingFailed
-	}
-	article.Body = c.DotReader()
-	err = s.backend.Post(&article)
+	article := c.DotReader()
+	err = s.backend.Post(article)
 	if err != nil {
 		return err
 	}
@@ -505,19 +551,15 @@ func handleIHave(args []string, s *session, c *textproto.Conn) error {
 	}
 
 	// XXX:  See if we have it.
-	article, err := s.backend.GetArticle(nil, args[0])
+	article, _, _, err := s.getArticle(false, args)
 	if article != nil {
+		article.Close()
 		return ErrNotWanted
 	}
 
 	c.PrintfLine("335 send it")
-	article = &nntp.Article{}
-	article.Header, err = c.ReadMIMEHeader()
-	if err != nil {
-		return ErrPostingFailed
-	}
-	article.Body = c.DotReader()
-	err = s.backend.Post(article)
+	postedArticle := c.DotReader()
+	err = s.backend.Post(postedArticle)
 	if err != nil {
 		return err
 	}

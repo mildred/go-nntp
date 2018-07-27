@@ -20,6 +20,9 @@ type NNTPError struct {
 	Msg  string
 }
 
+// ErrServiceDiscontinued is returned for service discontinued.
+var ErrServiceDiscontinued = &NNTPError{400, "Service discontinued"}
+
 // ErrNoSuchGroup is returned for a request for a group that can't be found.
 var ErrNoSuchGroup = &NNTPError{411, "No such newsgroup"}
 
@@ -27,21 +30,19 @@ var ErrNoSuchGroup = &NNTPError{411, "No such newsgroup"}
 // group when none has been selected.
 var ErrNoGroupSelected = &NNTPError{412, "No newsgroup selected"}
 
-// ErrInvalidMessageID is returned when a message is requested that can't be found.
-var ErrInvalidMessageID = &NNTPError{430, "No article with that message-id"}
-
-// ErrInvalidArticleNumber is returned when an article is requested that can't be found.
-var ErrInvalidArticleNumber = &NNTPError{423, "No article with that number"}
-
 // ErrNoCurrentArticle is returned when a command is executed that
 // requires a current article when one has not been selected.
 var ErrNoCurrentArticle = &NNTPError{420, "Current article number is invalid"}
 
-// ErrUnknownCommand is returned for unknown comands.
-var ErrUnknownCommand = &NNTPError{500, "Unknown command"}
+// ErrInvalidArticleNumber is returned when an article is requested that can't be found.
+var ErrInvalidArticleNumber = &NNTPError{423, "No article with that number"}
 
-// ErrSyntax is returned when a command can't be parsed.
-var ErrSyntax = &NNTPError{501, "not supported, or syntax error"}
+// ErrInvalidMessageID is returned when a message is requested that can't be found.
+var ErrInvalidMessageID = &NNTPError{430, "No article with that message-id"}
+
+// ErrNotWanted is returned when an attempt to post an article is
+// rejected due the server not wanting the article.
+var ErrNotWanted = &NNTPError{435, "Article not wanted"}
 
 // ErrPostingNotPermitted is returned as the response to an attempt to
 // post an article where posting is not permitted.
@@ -49,10 +50,6 @@ var ErrPostingNotPermitted = &NNTPError{440, "Posting not permitted"}
 
 // ErrPostingFailed is returned when an attempt to post an article fails.
 var ErrPostingFailed = &NNTPError{441, "posting failed"}
-
-// ErrNotWanted is returned when an attempt to post an article is
-// rejected due the server not wanting the article.
-var ErrNotWanted = &NNTPError{435, "Article not wanted"}
 
 // ErrAuthRequired is returned to indicate authentication is required
 // to proceed.
@@ -64,6 +61,20 @@ var ErrAuthRejected = &NNTPError{452, "authorization rejected"}
 // ErrNotAuthenticated is returned when a command is issued that requires
 // authentication, but authentication was not provided.
 var ErrNotAuthenticated = &NNTPError{480, "authentication required"}
+
+// ErrUnknownCommand is returned for unknown comands.
+var ErrUnknownCommand = &NNTPError{500, "Unknown command"}
+
+// ErrSyntax is returned when a command can't be parsed.
+var ErrSyntax = &NNTPError{501, "not supported, or syntax error"}
+
+// ErrPermissionDenied is returned when a command can't be executed due to lack
+// of permissions.
+var ErrPermissionDenied = &NNTPError{502, "access restriction, or permission denied"}
+
+// ErrFault is returned when the command could not be handled because of a
+// server error.
+var ErrFault = &NNTPError{503, "program fault, command not performed"}
 
 // Handler is a low-level protocol handler
 type Handler func(args []string, s *session, c *textproto.Conn) error
